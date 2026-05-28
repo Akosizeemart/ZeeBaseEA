@@ -142,6 +142,5 @@ CloseAllPositions(POSITION_TYPE_SELL);      // shorts only
 - `IsNewBar` uses one static variable — only call it with a single TF per EA. For two-TF checks, keep a separate `prevTime` for each.
 - `TrailSL` runs before the new-bar gate so it reacts to every tick, not just new bars.
 - Gold needs `InpMaxSpreadPoints` ~800+. EUR/USD can sit at 30. Don't leave the default on a new instrument.
-- Always backtest at least 2 years before forward testing.
 
 ---
