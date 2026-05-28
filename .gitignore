@@ -1,0 +1,80 @@
+# ───────────────────────────────────────────
+# MetaTrader 5 / MQL5
+# ───────────────────────────────────────────
+
+# Compiled EA binaries (never commit these — broker-specific and platform-specific)
+*.ex5
+*.ex4
+
+# MQL5 build artefacts
+*.log
+*.journal
+
+# MetaEditor backups
+*.bak
+
+# MT5 local tester files
+*.tst
+*.fxt
+*.hst
+
+# MT5 optimisation cache
+*.opt
+
+# ───────────────────────────────────────────
+# OS
+# ───────────────────────────────────────────
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.nfs*
+
+# ───────────────────────────────────────────
+# Editors & IDEs
+# ───────────────────────────────────────────
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim / Neovim
+*.swp
+*.swo
+Session.vim
+
+# ───────────────────────────────────────────
+# Personal / sensitive
+# ───────────────────────────────────────────
+
+# Never commit broker credentials or account config
+*.set
+*.ini
+
+# Local notes
+notes.txt
+TODO.txt
+scratch.*
