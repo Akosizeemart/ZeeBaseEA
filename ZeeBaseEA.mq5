@@ -1,11 +1,21 @@
-//+------------------------------------------------------------------+
-//|                                           ZeeBaseTemplate.mq5   |
-//|                                    Zee — MQL5 EA base template   |
+﻿//+------------------------------------------------------------------+
+//|                                              ZeeBaseEA.mq5 |
+//|                           Zee — Universal MQL5 EA Base Template  |
+//|                                                                  |
+//|  Includes:                                                       |
+//|   • IsNewBar()          — multi-TF new-bar detection             |
+//|   • HasOpenPosition()   — hedging-safe position check            |
+//|   • CloseAllPositions() — close all matching positions           |
+//|   • GetSpread()         — spread guard helper                    |
+//|   • CalculateLot()      — fixed-lot OR % equity sizing           |
+//|   • OpenTrade()         — buy/sell with SL & TP                  |
+//|   • TrailSL()           — stub for trailing-stop logic           |
+//|   • OnTick skeleton     — new-bar gated, spread-checked          |
 //+------------------------------------------------------------------+
 #property copyright "Zee"
 #property version   "1.00"
 #property strict
-#property description "Copy, rename, fill in signals. Everything else is done."
+#property description "Universal MQL5 EA baseline. Copy, rename, and build on top."
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
@@ -49,6 +59,11 @@ input bool   InpOneTradeOnly   = true;         // Allow only one open position
 input int    InpMaxSpreadPoints= 300;          // Max spread gate (points)
 input int    InpSlippagePoints = 20;           // Order slippage tolerance (points)
 
+input group "=== News Filter ==="
+input bool   InpUseNewsFilter     = true;      // Block trading around high-impact USD news
+input int    InpNewsMinutesBefore = 30;        // Minutes before news: stop trading
+input int    InpNewsMinutesAfter  = 30;        // Minutes after news: resume trading
+
 input group "=== Visuals ==="
 input bool   InpShowComment    = true;         // Show info block on chart
 
@@ -60,6 +75,7 @@ CTrade        trade;
 CPositionInfo posInfo;
 CSymbolInfo   symInfo;
 
+//--- Cached symbol constants
 double g_point      = 0.0;
 int    g_digits     = 0;
 long   g_stopsLevel = 0;
@@ -75,21 +91,24 @@ bool   g_isOptimization  = false;
 
 int OnInit()
   {
+   //--- Symbol info
    if(!symInfo.Name(_Symbol))
      {
       Print("ERR: symInfo.Name() failed for ", _Symbol);
       return INIT_FAILED;
      }
 
+   //--- Trade object setup
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpSlippagePoints);
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetAsyncMode(false);
 
+   //--- Environment flags
    g_isTester       = (bool)MQLInfoInteger(MQL_TESTER);
    g_isOptimization = (bool)MQLInfoInteger(MQL_OPTIMIZATION);
 
-   //--- cache to avoid repeated broker calls on every tick
+   //--- Cache symbol constants (avoids repeated broker calls inside OnTick)
    g_point      = symInfo.Point();
    g_digits     = symInfo.Digits();
    g_stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
@@ -103,11 +122,8 @@ int OnInit()
    // handleXXX = iRSI(_Symbol, InpSignalTF, 14, PRICE_CLOSE);
    // if(handleXXX == INVALID_HANDLE) return INIT_FAILED;
 
-   //--- prime detector so first tick doesn't fire as a new bar
-   IsNewBar(InpSignalTF);
-
    if(InpShowComment) Comment("");
-   Print("ZeeBaseTemplate: init on ", _Symbol, " / ", EnumToString(InpSignalTF));
+   Print("ZeeBaseTemplate: initialised on ", _Symbol, " / ", EnumToString(InpSignalTF));
    return INIT_SUCCEEDED;
   }
 
@@ -125,38 +141,56 @@ void OnDeinit(const int reason)
 
 void OnTick()
   {
-   //--- trail runs every tick, before the bar gate
+  
+  int highest = iHighest(_Symbol,PERIOD_CURRENT,MODE_HIGH,20,0);
+  double hih = iHigh(_Symbol,PERIOD_CURRENT,highest);
+  Print(highest);
+   //--- Always-on tick work (trails, BE moves, TP updates, etc.)
    if(symInfo.RefreshRates())
-      TrailSL();
+     {
+      TrailSL();       // ← implement as needed
+     }
 
+   //--- Gate everything below to new-bar only
    if(!IsNewBar(InpSignalTF))
       return;
 
    if(!symInfo.RefreshRates())
       return;
 
+   //--- Spread guard
    if(GetSpread() > InpMaxSpreadPoints)
      {
       if(InpShowComment) Comment("Spread too wide — waiting");
       return;
      }
 
+   //--- One-trade guard
    if(InpOneTradeOnly && HasOpenPosition())
       return;
+
+   //--- News filter (high-impact USD)
+   if(IsHighImpactUSDNewsTime())
+     {
+      if(InpShowComment) Comment("High-impact USD news window — no trading");
+      return;
+     }
 
    //--- TODO: read indicator values here
    // double rsi;
    // if(!GetRSI(handleXXX, 1, rsi)) return;
 
    //--- TODO: define your entry conditions
-   bool buySignal  = false;
-   bool sellSignal = false;
+   bool buySignal  = false; // replace with real logic
+   bool sellSignal = false; // replace with real logic
 
+   //--- Execute
    if(buySignal)
       OpenTrade(ORDER_TYPE_BUY);
    else if(sellSignal)
       OpenTrade(ORDER_TYPE_SELL);
 
+   //--- Chart comment
    if(InpShowComment)
       Comment(StringFormat(
          "=== %s | %s | Magic %I64d ===\n"
@@ -170,8 +204,7 @@ void OnTick()
   }
 
 //--------------------------------------------------------------------
-//  IsNewBar — single static, safe for one TF call per EA.
-//  If you need two TFs, keep a separate prevTime per timeframe.
+//  IsNewBar — returns true exactly once per new bar on the given TF
 //--------------------------------------------------------------------
 bool IsNewBar(const ENUM_TIMEFRAMES tf)
   {
@@ -185,21 +218,59 @@ bool IsNewBar(const ENUM_TIMEFRAMES tf)
    return false;
   }
 
+//--------------------------------------------------------------------
+//  GetSpread — returns current spread in points (integer)
+//--------------------------------------------------------------------
 int GetSpread()
   {
    return (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
   }
 
 //--------------------------------------------------------------------
-//  HasOpenPosition — netting: fast PositionSelect path.
-//  Hedging: full scan because multiple positions per symbol exist.
+//  IsHighImpactUSDNewsTime — true if now is inside the no-trade window
+//  around any high-impact USD calendar event.
+//  Window: [event - InpNewsMinutesBefore, event + InpNewsMinutesAfter].
+//--------------------------------------------------------------------
+bool IsHighImpactUSDNewsTime()
+  {
+   if(!InpUseNewsFilter) return false;
+
+   datetime now      = TimeTradeServer();
+   long     beforeS  = (long)InpNewsMinutesBefore * 60;
+   long     afterS   = (long)InpNewsMinutesAfter  * 60;
+   datetime fromTime = (datetime)((long)now - afterS);   // events whose "after" window still covers now
+   datetime toTime   = (datetime)((long)now + beforeS);  // upcoming events whose "before" window starts now
+
+   MqlCalendarValue values[];
+   int count = CalendarValueHistory(values, fromTime, toTime, NULL, "USD");
+   if(count <= 0) return false;
+
+   for(int i = 0; i < count; i++)
+     {
+      MqlCalendarEvent ev;
+      if(!CalendarEventById(values[i].event_id, ev)) continue;
+      if(ev.importance != CALENDAR_IMPORTANCE_HIGH)  continue;
+
+      datetime evTime    = values[i].time;
+      datetime blockFrom = (datetime)((long)evTime - beforeS);
+      datetime blockTo   = (datetime)((long)evTime + afterS);
+      if(now >= blockFrom && now <= blockTo) return true;
+     }
+   return false;
+  }
+
+//--------------------------------------------------------------------
+//  HasOpenPosition — true if a position exists for this EA's magic
+//  Handles both netting and hedging account modes correctly.
 //--------------------------------------------------------------------
 bool HasOpenPosition()
   {
+   //--- Fast path for netting accounts
    if(PositionSelect(_Symbol))
       if((long)PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
          return true;
 
+   //--- Full scan required for hedging accounts
    if((ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE)
       == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
      {
@@ -216,39 +287,38 @@ bool HasOpenPosition()
   }
 
 //--------------------------------------------------------------------
-//  CloseAllPositions — directionFilter: POSITION_TYPE_BUY,
-//  POSITION_TYPE_SELL, or -1 for everything.
+//  CloseAllPositions — closes every position for this EA on _Symbol
+//  Pass direction filter: POSITION_TYPE_BUY, POSITION_TYPE_SELL,
+//  or -1 to close all.
 //--------------------------------------------------------------------
 void CloseAllPositions(const int directionFilter = -1)
   {
    int total = PositionsTotal();
    for(int i = total - 1; i >= 0; i--)
      {
-      if(!posInfo.SelectByIndex(i))                    continue;
-      if(posInfo.Symbol()            != _Symbol)        continue;
-      if((long)posInfo.Magic()       != InpMagicNumber) continue;
+      if(!posInfo.SelectByIndex(i))  continue;
+      if(posInfo.Symbol()  != _Symbol)          continue;
+      if((long)posInfo.Magic() != InpMagicNumber) continue;
 
       if(directionFilter != -1 &&
          (int)posInfo.PositionType() != directionFilter)
          continue;
 
-      ulong  ticket     = posInfo.Ticket();
-      string dir        = (posInfo.PositionType() == POSITION_TYPE_BUY ? "BUY" : "SELL");
-      double closePrice = (posInfo.PositionType() == POSITION_TYPE_BUY)
-                         ? symInfo.Bid() : symInfo.Ask();
-
-      bool ok = trade.PositionClose(ticket, InpSlippagePoints);
+      bool ok = trade.PositionClose(posInfo.Ticket(), InpSlippagePoints);
       if(!ok)
          PrintFormat("CloseAllPositions: failed ticket=%I64u err=%d",
-                     ticket, GetLastError());
+                     posInfo.Ticket(), GetLastError());
       else
          PrintFormat("CloseAllPositions: closed ticket=%I64u %s @ %.5f",
-                     ticket, dir, closePrice);
+                     posInfo.Ticket(),
+                     (posInfo.PositionType() == POSITION_TYPE_BUY ? "BUY" : "SELL"),
+                     posInfo.PriceCurrent());
      }
   }
 
 //--------------------------------------------------------------------
-//  CalculateLot — slDistance in price units (entry to stop)
+//  CalculateLot — fixed lot or % equity risk based on SL distance
+//  slDistance: price distance from entry to stop (in price units)
 //--------------------------------------------------------------------
 double CalculateLot(const double slDistance)
   {
@@ -269,6 +339,7 @@ double CalculateLot(const double slDistance)
       lots = riskMoney / lossPerLot;
      }
 
+   //--- Normalise to broker lot step
    if(g_lotStep > 0.0)
       lots = MathFloor(lots / g_lotStep) * g_lotStep;
 
@@ -283,10 +354,14 @@ double CalculateLot(const double slDistance)
 //  ENTRY / EXIT
 //===================================================================
 
+//--------------------------------------------------------------------
+//  OpenTrade — places a buy or sell order
+//  SL & TP are calculated from InpSL_Points / InpTP_Points.
+//  Replace this with entry logic (swing high/low, ATR, etc.)
+//--------------------------------------------------------------------
 void OpenTrade(const ENUM_ORDER_TYPE orderType)
   {
    double price, sl, tp;
-   //--- broker stop-level clamp: SL must be at least stopsLevel points away
    double minDist  = MathMax((double)g_stopsLevel, (double)InpMinStopPoints) * g_point;
    double slPoints = MathMax(InpSL_Points, InpMinStopPoints) * g_point;
    double tpPoints = InpTP_Points * g_point;
@@ -297,6 +372,7 @@ void OpenTrade(const ENUM_ORDER_TYPE orderType)
       sl    = NormalizeDouble(price - slPoints, g_digits);
       tp    = NormalizeDouble(price + tpPoints, g_digits);
 
+      //--- Broker min-distance clamp
       if((price - sl) < minDist) sl = NormalizeDouble(price - minDist, g_digits);
       if((tp - price) < minDist) tp = NormalizeDouble(price + minDist, g_digits);
      }
@@ -323,19 +399,25 @@ void OpenTrade(const ENUM_ORDER_TYPE orderType)
              : trade.Sell(lots, _Symbol, price, sl, tp, InpTradeComment);
 
    if(!ok)
-      PrintFormat("OpenTrade: failed retcode=%d err=%d lots=%.2f price=%.5f sl=%.5f tp=%.5f",
-                  trade.ResultRetcode(), GetLastError(), lots, price, sl, tp);
+      PrintFormat("OpenTrade: OrderSend failed. retcode=%d err=%d lots=%.2f "
+                  "price=%.5f sl=%.5f tp=%.5f",
+                  trade.ResultRetcode(), GetLastError(),
+                  lots, price, sl, tp);
    else
       PrintFormat("OpenTrade: %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
-                  (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL"), lots, price, sl, tp);
+                  (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL"),
+                  lots, price, sl, tp);
   }
 
 //--------------------------------------------------------------------
-//  TrailSL — runs every tick before the new-bar gate.
-//  Move SL only in the profitable direction — never widen it.
+//  TrailSL — stub: implement your trailing stop logic here.
+//  Called every tick BEFORE the new-bar gate.
+//  Pattern: move SL only if it would improve (never widen).
 //--------------------------------------------------------------------
 void TrailSL()
   {
+   //--- Example skeleton — adapt to your strategy:
+   //
    // double buffer = InpSL_BufferPoints * g_point;
    // int total = PositionsTotal();
    // for(int i = total - 1; i >= 0; i--)
@@ -365,14 +447,17 @@ void TrailSL()
    //      }
    //
    //    if(move)
+   //      {
    //       trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
+   //      }
    //   }
   }
 
 //===================================================================
-//  INDICATOR HELPERS
+//  INDICATOR HELPERS  (copy-paste pattern — one per indicator)
 //===================================================================
 
+//--- RSI helper (single buffer, single value at shift)
 bool GetRSI(const int handle, const int shift, double &value)
   {
    double buf[1];
@@ -381,7 +466,7 @@ bool GetRSI(const int handle, const int shift, double &value)
    return true;
   }
 
-//--- BB buffer layout: 0=mid, 1=upper, 2=lower
+//--- Bollinger Bands helper (upper=buf1, mid=buf0, lower=buf2)
 bool GetBB(const int handle, const int shift,
            double &upper, double &middle, double &lower)
   {
@@ -395,6 +480,7 @@ bool GetBB(const int handle, const int shift,
    return true;
   }
 
+//--- MA helper (any iMA handle)
 bool GetMA(const int handle, const int shift, double &value)
   {
    double buf[1];
@@ -403,6 +489,7 @@ bool GetMA(const int handle, const int shift, double &value)
    return true;
   }
 
+//--- ATR helper
 bool GetATR(const int handle, const int shift, double &value)
   {
    double buf[1];
@@ -411,7 +498,7 @@ bool GetATR(const int handle, const int shift, double &value)
    return true;
   }
 
-//--- MACD: 0=main, 1=signal
+//--- MACD helper  (main=buf0, signal=buf1)
 bool GetMACD(const int handle, const int shift,
              double &main, double &signal)
   {
@@ -423,7 +510,7 @@ bool GetMACD(const int handle, const int shift,
    return true;
   }
 
-//--- Stochastic: 0=main, 1=signal
+//--- Stochastic helper (main=buf0, signal=buf1)
 bool GetStoch(const int handle, const int shift,
               double &main, double &signal)
   {
@@ -435,7 +522,7 @@ bool GetStoch(const int handle, const int shift,
    return true;
   }
 
-//--- Ichimoku: 0=tenkan, 1=kijun, 2=spA, 3=spB, 4=chikou
+//--- Ichimoku helper  (tenkan=0 kijun=1 spA=2 spB=3 chikou=4)
 bool GetIchimoku(const int handle, const int shift,
                  double &tenkan, double &kijun,
                  double &spA,    double &spB,
@@ -453,7 +540,7 @@ bool GetIchimoku(const int handle, const int shift,
   }
 
 //===================================================================
-//  SWING HIGH / LOW
+//  SWING HIGH / LOW  (fractal-style pivot scan on any TF)
 //===================================================================
 
 double FindSwingLow(const ENUM_TIMEFRAMES tf,
@@ -472,7 +559,7 @@ double FindSwingLow(const ENUM_TIMEFRAMES tf,
         }
       if(isPivot) return low_i;
      }
-   //--- fallback to absolute low when no clean pivot found
+   //--- Fallback: absolute lowest bar in lookback window
    int idx = iLowest(_Symbol, tf, MODE_LOW, lookback, 1);
    return (idx >= 0) ? iLow(_Symbol, tf, idx) : 0.0;
   }
@@ -496,3 +583,4 @@ double FindSwingHigh(const ENUM_TIMEFRAMES tf,
    int idx = iHighest(_Symbol, tf, MODE_HIGH, lookback, 1);
    return (idx >= 0) ? iHigh(_Symbol, tf, idx) : 0.0;
   }
+
